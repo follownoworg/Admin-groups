@@ -1,5 +1,5 @@
 // src/app/whatsapp.js
-import { makeWASocket, fetchLatestBaileysVersion } from 'baileys'; // ✅ هكذا، NOT default
+import { makeWASocket, fetchLatestBaileysVersion } from 'baileys';
 import NodeCache from 'node-cache';
 import qrcode from 'qrcode';
 import logger from '../lib/logger.js';
@@ -21,11 +21,12 @@ function storeMessage(msg) {
 
 export async function createWhatsApp({ telegram } = {}) {
   // تهيئة الحالة (Astra)
-  let state, saveCreds;
+  let state, saveCreds, resetCreds;
   try {
     const a = await astraAuthState();
     state = a.state;
     saveCreds = a.saveCreds;
+    resetCreds = a.resetCreds;
   } catch (e) {
     logger.error(
       {
@@ -79,7 +80,6 @@ export async function createWhatsApp({ telegram } = {}) {
     lastQrTs = now;
 
     try {
-      // لو تيليجرام يوفّر sendQR، استخدمه
       if (telegram?.sendQR) {
         await telegram.sendQR(qr);
         logger.info('QR sent to Telegram via telegram.sendQR');
@@ -89,7 +89,6 @@ export async function createWhatsApp({ telegram } = {}) {
       logger.warn({ e }, 'telegram.sendQR failed, will fallback to local PNG');
     }
 
-    // توليد صورة PNG داخليًا وإرسالها مباشرة
     try {
       const png = await qrcode.toBuffer(qr, {
         type: 'png',
@@ -118,13 +117,27 @@ export async function createWhatsApp({ telegram } = {}) {
     }
   }
 
-  // مراقبة الاتصال + إرسال QR
+  // مراقبة الاتصال + إرسال QR + استشفاء الجلسة التالفة
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect, qr } = u || {};
+    const reason = lastDisconnect?.error?.message || '';
     logger.info(
-      { connection, lastDisconnectReason: lastDisconnect?.error?.message, hasQR: Boolean(qr) },
+      { connection, lastDisconnectReason: reason, hasQR: Boolean(qr) },
       'WA connection.update'
     );
+
+    // لو الجلسة تالفة (noiseKey.public undefined) — احذف creds وأنهِ البروسس ليُعاد التشغيل بجلسة جديدة
+    if (/reading 'public'/.test(reason) || /noise/i.test(reason)) {
+      try {
+        await resetCreds?.();
+        logger.warn('⚠️ Creds were corrupt. Reset done. Forcing restart...');
+      } catch (e) {
+        logger.warn({ e }, 'resetCreds failed');
+      } finally {
+        // نُنهي العملية ليرجع Render يشغّلها من جديد فتظهر QR جديدة
+        process.exit(0);
+      }
+    }
 
     if (qr && telegram) {
       await sendQrToTelegram(qr);
