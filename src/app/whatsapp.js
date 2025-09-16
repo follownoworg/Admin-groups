@@ -1,5 +1,5 @@
 // src/app/whatsapp.js
-import makeWASocket, { fetchLatestBaileysVersion } from 'baileys';
+import { makeWASocket, fetchLatestBaileysVersion } from 'baileys'; // ✅ هكذا، NOT default
 import NodeCache from 'node-cache';
 import qrcode from 'qrcode';
 import logger from '../lib/logger.js';
@@ -73,8 +73,7 @@ export async function createWhatsApp({ telegram } = {}) {
     if (!qr) return;
     const now = Date.now();
     if (qr === lastQr && now - lastQrTs < QR_DEBOUNCE_MS) {
-      // نفس الكود قريبًا — تجاهل
-      return;
+      return; // نفس الكود أُرسل للتو
     }
     lastQr = qr;
     lastQrTs = now;
@@ -164,4 +163,4 @@ export async function createWhatsApp({ telegram } = {}) {
   registerSelfHeal(sock, { messageStore });
 
   return sock;
-          }
+}
