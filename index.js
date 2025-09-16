@@ -6,12 +6,16 @@ import { registerGroupParticipantHandler } from './src/handlers/groups.js';
 import { startTelegram } from './src/app/telegram.js';
 import logger from './src/lib/logger.js';
 
-process.on('unhandledRejection', (e) => logger.error({ e }, 'unhandledRejection'));
-process.on('uncaughtException',  (e) => logger.error({ e }, 'uncaughtException'));
+process.on('unhandledRejection', (e) =>
+  logger.error({ e: e instanceof Error ? { message: e.message, stack: e.stack } : e }, 'unhandledRejection')
+);
+process.on('uncaughtException',  (e) =>
+  logger.error({ e: e instanceof Error ? { message: e.message, stack: e.stack } : e }, 'uncaughtException')
+);
 
 (async () => {
-  const app = startExpress();                  // ⬅️ خذ instance من Express
-  const telegram = startTelegram(app);         // ⬅️ مرّر app للـ webhook
+  const app = startExpress();          // ⬅️ instance من Express
+  const telegram = startTelegram(app); // ⬅️ مرّر app للـ webhook (إن كان مفعّل)
 
   const sock = await createWhatsApp({ telegram });
 
