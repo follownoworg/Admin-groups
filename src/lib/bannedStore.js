@@ -1,11 +1,12 @@
-import { collections } from './astra.js';
+// src/lib/bannedStore.js
+import { getDoc, upsertDoc } from './astra.js';
+import { ASTRA_BANNED_COLLECTION } from '../config/settings.js';
 
 const DOC_ID = 'global';
 
 export async function getBanned() {
-  const { banned } = await collections();
   try {
-    const doc = await banned.get(DOC_ID);
+    const doc = await getDoc(ASTRA_BANNED_COLLECTION, DOC_ID);
     const arr = Array.isArray(doc?.words) ? doc.words : [];
     return Array.from(new Set(arr.map(w => String(w || '').trim()).filter(Boolean)));
   } catch {
@@ -14,10 +15,8 @@ export async function getBanned() {
 }
 
 export async function setBanned(words) {
-  const { banned } = await collections();
   const clean = Array.from(new Set((words || []).map(w => String(w || '').trim()).filter(Boolean)));
-  try { await banned.update(DOC_ID, { words: clean }); }
-  catch { await banned.create(DOC_ID, { words: clean }); }
+  await upsertDoc(ASTRA_BANNED_COLLECTION, DOC_ID, { words: clean });
   return clean;
 }
 
