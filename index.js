@@ -1,48 +1,35 @@
+// index.js
 import { startExpress } from './src/app/express.js';
-import { startWhatsApp } from './src/app/whatsapp.js';
+import { createWhatsApp } from './src/app/whatsapp.js';
 import { onMessageUpsert } from './src/handlers/messages.js';
 import { registerGroupParticipantHandler } from './src/handlers/groups.js';
 import { startTelegram } from './src/app/telegram.js';
-import { acquireLock, releaseLock } from './src/lib/leader-lock.js';
 import logger from './src/lib/logger.js';
+import { TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID } from './src/config/settings.js';
+
+// (اختياري) التقاط الأخطاء غير الملتقطة
+process.on('unhandledRejection', (e) => logger.error({ e }, 'unhandledRejection'));
+process.on('uncaughtException',  (e) => logger.error({ e }, 'uncaughtException'));
 
 (async () => {
-  // 1) HTTP server (Render يحب يشوف منفذ مبكرًا)
+  // ابدأ HTTP (مهم لـ Render لاعتبار الخدمة "حية")
   startExpress();
 
-  // 2) Leader Lock (يمنع أكثر من نسخة)
-  const HOLDER = process.env.RENDER_INSTANCE_ID || process.pid.toString();
-  const ok = await acquireLock('whatsapp-bot-leader', HOLDER, 60);
-  if (!ok) {
-    logger.warn('Another instance holds the lock. Exiting.');
-    process.exit(0);
-    return;
+  // ابدأ تيليجرام (اختياري لو ما عندك توكن)
+  const telegram = (TELEGRAM_TOKEN && TELEGRAM_ADMIN_ID)
+    ? startTelegram(TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID)
+    : null;
+
+  // ابدأ واتساب باستخدام تخزين Astra (عبر wa-astra-auth.js)
+  const sock = await createWhatsApp({ telegram });
+
+  // اربط الهاندلرز
+  if (typeof onMessageUpsert === 'function') {
+    sock.ev.on('messages.upsert', onMessageUpsert(sock));
   }
-  const renew = setInterval(async () => {
-    const renewed = await acquireLock('whatsapp-bot-leader', HOLDER, 60);
-    if (!renewed) {
-      logger.error('Lost leadership lock, exiting.');
-      process.exit(1);
-    }
-  }, 45_000).unref?.();
+  if (typeof registerGroupParticipantHandler === 'function') {
+    registerGroupParticipantHandler(sock);
+  }
 
-  // 3) Telegram
-  const telegram = startTelegram();
-
-  // 4) WhatsApp
-  const sock = await startWhatsApp({ telegram });
-
-  // 5) Handlers
-  sock.ev.on('messages.upsert', onMessageUpsert(sock));
-  registerGroupParticipantHandler(sock);
-
-  logger.info('✅ Bot started (clean, Astra only).');
-
-  // 6) shutdown
-  const shutdown = () => {
-    clearInterval(renew);
-    releaseLock('whatsapp-bot-leader', HOLDER).finally(() => process.exit(0));
-  };
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
+  logger.info('✅ Bot started (groups: moderation only; DMs: replies).');
 })();
