@@ -10,22 +10,45 @@ import logger from './logger.js';
 const enc = (x) => JSON.parse(JSON.stringify(x, BufferJSON.replacer));
 const dec = (x) => JSON.parse(JSON.stringify(x), BufferJSON.reviver);
 
+// بعض دوال Astra قد تُرجع { value: {...} } أو ترجع الوثيقة مباشرة.
+// لذلك نفك التغليف إن وجد:
+function unwrap(doc) {
+  if (!doc) return null;
+  return (Object.prototype.hasOwnProperty.call(doc, 'value') ? doc.value : doc);
+}
+
+// فحص أن الـ creds تبدو سليمة (وجود noiseKey وغيره)
+function credsLooksValid(c) {
+  try {
+    return Boolean(c?.noiseKey?.public && c?.noiseKey?.private && c?.signedIdentityKey?.public);
+  } catch {
+    return false;
+  }
+}
+
 export async function astraAuthState() {
-  // creds
+  // --------- تحميل/إنشاء creds ----------
   let creds;
   try {
-    const doc = await getDoc(ASTRA_CREDS_COLLECTION, 'creds');
-    creds = dec(doc);
+    const doc = await getDoc(ASTRA_CREDS_COLLECTION, 'creds'); // قد تُرمى 404
+    const raw = unwrap(doc);
+    const maybe = dec(raw);
+    if (credsLooksValid(maybe)) {
+      creds = maybe;
+    } else {
+      throw new Error('creds invalid/corrupt');
+    }
   } catch (e) {
-    logger.error({ err: e.message || e }, 'astraAuthState: create creds failed');
+    logger.warn({ msg: 'creating fresh creds', reason: e?.message }, 'astraAuthState');
     creds = initAuthCreds();
     try {
-      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds));
-    } catch (e2) {
-      logger.error({ err: e2.message || e2 }, 'astraAuthState: save new creds failed');
+      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', { value: enc(creds) });
+    } catch (err) {
+      logger.warn({ err }, 'astraAuthState: create creds failed');
     }
   }
 
+  // --------- تخزين المفاتيح ----------
   const keys = {
     async get(type, ids) {
       const out = {};
@@ -33,9 +56,9 @@ export async function astraAuthState() {
         const keyId = `${type}-${id}`;
         try {
           const doc = await getDoc(ASTRA_KEYS_COLLECTION, keyId);
-          out[id] = dec(doc)?.value;
-        } catch (e) {
-          logger.warn({ err: e.message || e, keyId }, 'astraAuthState: get key failed');
+          const raw = unwrap(doc);
+          out[id] = dec(raw)?.value ?? dec(raw); // دعم الشكلين
+        } catch {
           out[id] = undefined;
         }
       }));
@@ -48,17 +71,10 @@ export async function astraAuthState() {
           const val = data[type][id];
           const keyId = `${type}-${id}`;
           if (val == null) {
-            ops.push(
-              deleteDoc(ASTRA_KEYS_COLLECTION, keyId).catch((e) =>
-                logger.warn({ err: e.message || e, keyId }, 'astraAuthState: delete key failed')
-              )
-            );
+            ops.push(deleteDoc(ASTRA_KEYS_COLLECTION, keyId).catch(() => null));
           } else {
-            ops.push(
-              upsertDoc(ASTRA_KEYS_COLLECTION, keyId, { value: enc(val) }).catch((e) =>
-                logger.warn({ err: e.message || e, keyId }, 'astraAuthState: upsert key failed')
-              )
-            );
+            // نخزّن دائماً تحت { value: ... } للاتساق
+            ops.push(upsertDoc(ASTRA_KEYS_COLLECTION, keyId, { value: enc(val) }).catch(() => null));
           }
         }
       }
@@ -68,11 +84,23 @@ export async function astraAuthState() {
 
   async function saveCreds() {
     try {
-      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds));
+      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', { value: enc(creds) });
     } catch (e) {
-      logger.error({ err: e.message || e }, 'saveCreds failed');
+      logger.warn({ e }, 'saveCreds failed');
     }
   }
 
-  return { state: { creds, keys }, saveCreds };
+  // API إضافي: حذف الجلسة وإعادة إنشائها (للاستشفاء من تلف الجلسة)
+  async function resetCreds() {
+    try { await deleteDoc(ASTRA_CREDS_COLLECTION, 'creds'); } catch {}
+    const fresh = initAuthCreds();
+    try { await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', { value: enc(fresh) }); } catch (e) {
+      logger.warn({ e }, 'resetCreds: upsert failed');
+    }
+    // مهم: نُحدّث نفس المرجع الذي مع Baileys
+    Object.assign(creds, fresh);
+    return fresh;
+  }
+
+  return { state: { creds, keys }, saveCreds, resetCreds };
 }
