@@ -10,9 +10,10 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
+    "baileys": "^6.7.9",                // ✅ غيرت الاسم الرسمي
     "express": "^4.19.2",
     "node-telegram-bot-api": "^0.66.0",
-    "pino": "^9.0.0"
+    "pino": "^9.0.0",
+    "node-cache": "^5.1.2"              // ✅ أضفناها
   }
 }
