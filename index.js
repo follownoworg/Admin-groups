@@ -5,25 +5,16 @@ import { onMessageUpsert } from './src/handlers/messages.js';
 import { registerGroupParticipantHandler } from './src/handlers/groups.js';
 import { startTelegram } from './src/app/telegram.js';
 import logger from './src/lib/logger.js';
-import { TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID } from './src/config/settings.js';
 
-// (اختياري) التقاط الأخطاء غير الملتقطة
 process.on('unhandledRejection', (e) => logger.error({ e }, 'unhandledRejection'));
 process.on('uncaughtException',  (e) => logger.error({ e }, 'uncaughtException'));
 
 (async () => {
-  // ابدأ HTTP (مهم لـ Render لاعتبار الخدمة "حية")
-  startExpress();
+  const app = startExpress();                  // ⬅️ خذ instance من Express
+  const telegram = startTelegram(app);         // ⬅️ مرّر app للـ webhook
 
-  // ابدأ تيليجرام (اختياري لو ما عندك توكن)
-  const telegram = (TELEGRAM_TOKEN && TELEGRAM_ADMIN_ID)
-    ? startTelegram(TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID)
-    : null;
-
-  // ابدأ واتساب باستخدام تخزين Astra (عبر wa-astra-auth.js)
   const sock = await createWhatsApp({ telegram });
 
-  // اربط الهاندلرز
   if (typeof onMessageUpsert === 'function') {
     sock.ev.on('messages.upsert', onMessageUpsert(sock));
   }
