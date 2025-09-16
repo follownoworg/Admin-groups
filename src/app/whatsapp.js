@@ -27,7 +27,15 @@ export async function createWhatsApp({ telegram } = {}) {
     state = a.state;
     saveCreds = a.saveCreds;
   } catch (e) {
-    logger.error({ e }, '❌ Astra init failed. تأكد من ASTRA_DB_API_ENDPOINT / ASTRA_DB_APPLICATION_TOKEN / ASTRA_DB_KEYSPACE');
+    logger.error(
+      {
+        e: e instanceof Error ? { message: e.message, stack: e.stack } : e,
+        ASTRA_DB_API_ENDPOINT: process.env.ASTRA_DB_API_ENDPOINT,
+        ASTRA_DB_KEYSPACE: process.env.ASTRA_DB_KEYSPACE,
+        hasToken: Boolean(process.env.ASTRA_DB_APPLICATION_TOKEN),
+      },
+      '❌ Astra init failed. تأكد من ASTRA_DB_API_ENDPOINT / ASTRA_DB_APPLICATION_TOKEN / ASTRA_DB_KEYSPACE'
+    );
     throw e;
   }
 
@@ -56,7 +64,62 @@ export async function createWhatsApp({ telegram } = {}) {
   // حفظ الجلسة
   sock.ev.on('creds.update', saveCreds);
 
-  // مراقبة الاتصال + إرسال QR كصورة إلى تيليجرام
+  // --- إرسال QR لتيليجرام كصورة مع حماية من التكرار ---
+  let lastQr = '';
+  let lastQrTs = 0;
+  const QR_DEBOUNCE_MS = 10_000; // لا نرسل أكثر من مرّة كل 10 ثواني
+
+  async function sendQrToTelegram(qr) {
+    if (!qr) return;
+    const now = Date.now();
+    if (qr === lastQr && now - lastQrTs < QR_DEBOUNCE_MS) {
+      // نفس الكود قريبًا — تجاهل
+      return;
+    }
+    lastQr = qr;
+    lastQrTs = now;
+
+    try {
+      // لو تيليجرام يوفّر sendQR، استخدمه
+      if (telegram?.sendQR) {
+        await telegram.sendQR(qr);
+        logger.info('QR sent to Telegram via telegram.sendQR');
+        return;
+      }
+    } catch (e) {
+      logger.warn({ e }, 'telegram.sendQR failed, will fallback to local PNG');
+    }
+
+    // توليد صورة PNG داخليًا وإرسالها مباشرة
+    try {
+      const png = await qrcode.toBuffer(qr, {
+        type: 'png',
+        errorCorrectionLevel: 'M',
+        margin: 1,
+        scale: 6,
+        width: 512,
+      });
+      await telegram?.sendPhoto?.(
+        process.env.TELEGRAM_ADMIN_ID,
+        png,
+        { caption: '📲 امسح هذا الرمز لربط واتساب' }
+      );
+      logger.info('QR PNG sent to Telegram (fallback path)');
+    } catch (e) {
+      logger.warn({ e }, 'فشل إرسال QR كصورة إلى تيليجرام — سنحاول كنص');
+      try {
+        await telegram?.sendMessage?.(
+          process.env.TELEGRAM_ADMIN_ID,
+          '📲 امسح هذا الكود لربط واتساب:\n\n' + qr
+        );
+        logger.info('QR TEXT sent to Telegram (fallback of fallback)');
+      } catch (e2) {
+        logger.error({ e2 }, 'فشل إرسال QR نصاً أيضاً');
+      }
+    }
+  }
+
+  // مراقبة الاتصال + إرسال QR
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect, qr } = u || {};
     logger.info(
@@ -65,31 +128,7 @@ export async function createWhatsApp({ telegram } = {}) {
     );
 
     if (qr && telegram) {
-      try {
-        // توليد صورة PNG من نص الـ QR
-        const png = await qrcode.toBuffer(qr, {
-          type: 'png',
-          errorCorrectionLevel: 'M',
-          margin: 1,
-          scale: 6,
-        });
-
-        await telegram.sendPhoto(
-          process.env.TELEGRAM_ADMIN_ID,
-          png,
-          { caption: '📲 امسح هذا الرمز لربط واتساب' }
-        );
-      } catch (e) {
-        logger.warn({ e }, 'فشل إرسال QR كصورة إلى تيليجرام — سنرسل النص كبديل');
-        try {
-          await telegram.sendMessage(
-            process.env.TELEGRAM_ADMIN_ID,
-            '📲 امسح هذا الكود لربط واتساب:\n\n' + qr
-          );
-        } catch (e2) {
-          logger.error({ e2 }, 'فشل إرسال QR نصاً أيضاً');
-        }
-      }
+      await sendQrToTelegram(qr);
     }
   });
 
@@ -125,4 +164,4 @@ export async function createWhatsApp({ telegram } = {}) {
   registerSelfHeal(sock, { messageStore });
 
   return sock;
-}
+          }
