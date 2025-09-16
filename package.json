@@ -1,6 +1,7 @@
 {
   "name": "whatsapp-telegram-bot-clean",
-  "version": "1.0.1",
+  "version": "1.0.2",
+  "description": "Clean WhatsApp bot with Telegram admin and Astra DB (Data API)",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -10,10 +11,10 @@
     "node": ">=18"
   },
   "dependencies": {
-    "baileys": "^6.7.9",                // ✅ غيرت الاسم الرسمي
+    "baileys": "^6.7.9",
     "express": "^4.19.2",
+    "node-cache": "^5.1.2",
     "node-telegram-bot-api": "^0.66.0",
-    "pino": "^9.0.0",
-    "node-cache": "^5.1.2"              // ✅ أضفناها
+    "pino": "^9.0.0"
   }
 }
