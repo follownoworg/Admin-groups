@@ -1,33 +1,38 @@
+// src/lib/wa-astra-auth.js
 import { BufferJSON, initAuthCreds } from '@whiskeysockets/baileys';
-import { collections } from './astra.js';
+import { getDoc, upsertDoc, deleteDoc } from './astra.js';
+import {
+  ASTRA_CREDS_COLLECTION,
+  ASTRA_KEYS_COLLECTION
+} from '../config/settings.js';
 import logger from './logger.js';
 
-function enc(x) { return JSON.parse(JSON.stringify(x, BufferJSON.replacer)); }
-function dec(x) { return JSON.parse(JSON.stringify(x), BufferJSON.reviver); }
+const enc = (x) => JSON.parse(JSON.stringify(x, BufferJSON.replacer));
+const dec = (x) => JSON.parse(JSON.stringify(x), BufferJSON.reviver);
 
 export async function astraAuthState() {
-  const { creds: credsCol, keys: keysCol } = await collections();
-
+  // creds
   let creds;
   try {
-    const doc = await credsCol.get('creds');
+    const doc = await getDoc(ASTRA_CREDS_COLLECTION, 'creds');
     creds = dec(doc);
   } catch {
     creds = initAuthCreds();
-    try { await credsCol.create('creds', enc(creds)); } catch (e) {
-      logger.warn({ e }, 'astraAuthState: create creds ignored (exists?)');
-    }
+    try { await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds)); }
+    catch (e) { logger.warn({ e }, 'astraAuthState: create creds failed'); }
   }
 
   const keys = {
     async get(type, ids) {
       const out = {};
-      await Promise.all((ids || []).map(async id => {
+      await Promise.all((ids || []).map(async (id) => {
         const keyId = `${type}-${id}`;
         try {
-          const doc = await keysCol.get(keyId);
+          const doc = await getDoc(ASTRA_KEYS_COLLECTION, keyId);
           out[id] = dec(doc)?.value;
-        } catch { out[id] = undefined; }
+        } catch {
+          out[id] = undefined;
+        }
       }));
       return out;
     },
@@ -38,12 +43,9 @@ export async function astraAuthState() {
           const val = data[type][id];
           const keyId = `${type}-${id}`;
           if (val == null) {
-            ops.push(keysCol.delete(keyId).catch(() => null));
+            ops.push(deleteDoc(ASTRA_KEYS_COLLECTION, keyId).catch(() => null));
           } else {
-            const body = { value: enc(val) };
-            ops.push(keysCol.update(keyId, body).catch(async () => {
-              try { await keysCol.create(keyId, body); } catch {}
-            }));
+            ops.push(upsertDoc(ASTRA_KEYS_COLLECTION, keyId, { value: enc(val) }).catch(() => null));
           }
         }
       }
@@ -52,10 +54,8 @@ export async function astraAuthState() {
   };
 
   async function saveCreds() {
-    try { await credsCol.update('creds', enc(creds)); }
-    catch { try { await credsCol.create('creds', enc(creds)); } catch (e) {
-      logger.warn({ e }, 'saveCreds: create failed');
-    }}
+    try { await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds)); }
+    catch (e) { logger.warn({ e }, 'saveCreds failed'); }
   }
 
   return { state: { creds, keys }, saveCreds };
