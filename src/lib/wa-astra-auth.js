@@ -1,5 +1,5 @@
 // src/lib/wa-astra-auth.js
-import { BufferJSON, initAuthCreds } from '@whiskeysockets/baileys';
+import { BufferJSON, initAuthCreds } from 'baileys';
 import { getDoc, upsertDoc, deleteDoc } from './astra.js';
 import {
   ASTRA_CREDS_COLLECTION,
