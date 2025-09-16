@@ -1,12 +1,13 @@
 // src/app/whatsapp.js
 import makeWASocket, { fetchLatestBaileysVersion } from 'baileys';
 import NodeCache from 'node-cache';
+import qrcode from 'qrcode';
 import logger from '../lib/logger.js';
 import { astraAuthState } from '../lib/wa-astra-auth.js';
 import { registerSelfHeal } from '../lib/selfheal.js';
 
-// --------- مخزن رسائل بسيط (لدعم retries) ----------
-const messageStore = new Map(); // key: msg.key.id -> value: proto message
+// مخزن رسائل بسيط (لدعم retries)
+const messageStore = new Map(); // key: msg.key.id -> proto
 const MAX_STORE = Number(process.env.WA_MESSAGE_STORE_MAX || 5000);
 
 function storeMessage(msg) {
@@ -18,9 +19,18 @@ function storeMessage(msg) {
   messageStore.set(msg.key.id, msg);
 }
 
-// --------- تهيئة واتساب ----------
 export async function createWhatsApp({ telegram } = {}) {
-  const { state, saveCreds } = await astraAuthState(); // ⬅️ استخدم Astra بدل Mongo
+  // تهيئة الحالة (Astra)
+  let state, saveCreds;
+  try {
+    const a = await astraAuthState();
+    state = a.state;
+    saveCreds = a.saveCreds;
+  } catch (e) {
+    logger.error({ e }, '❌ Astra init failed. تأكد من ASTRA_DB_API_ENDPOINT / ASTRA_DB_APPLICATION_TOKEN / ASTRA_DB_KEYSPACE');
+    throw e;
+  }
+
   const { version } = await fetchLatestBaileysVersion();
 
   const msgRetryCounterCache = new NodeCache({
@@ -32,16 +42,13 @@ export async function createWhatsApp({ telegram } = {}) {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: !telegram, // لو ما فيه تيليجرام، يطبع QR في اللوغ
+    printQRInTerminal: !telegram, // لو ما فيه تيليجرام يطبع QR في اللوغ
     logger,
     emitOwnEvents: false,
     syncFullHistory: false,
     shouldSyncHistoryMessage: () => false,
     markOnlineOnConnect: false,
-    getMessage: async (key) => {
-      if (!key?.id) return undefined;
-      return messageStore.get(key.id);
-    },
+    getMessage: async (key) => (key?.id ? messageStore.get(key.id) : undefined),
     msgRetryCounterCache,
     shouldIgnoreJid: (jid) => jid === 'status@broadcast',
   });
@@ -49,7 +56,7 @@ export async function createWhatsApp({ telegram } = {}) {
   // حفظ الجلسة
   sock.ev.on('creds.update', saveCreds);
 
-  // مراقبة الاتصال
+  // مراقبة الاتصال + إرسال QR كصورة إلى تيليجرام
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect, qr } = u || {};
     logger.info(
@@ -57,15 +64,31 @@ export async function createWhatsApp({ telegram } = {}) {
       'WA connection.update'
     );
 
-    // إرسال QR للتيليجرام لو متاح
     if (qr && telegram) {
       try {
-        await telegram.sendMessage(
+        // توليد صورة PNG من نص الـ QR
+        const png = await qrcode.toBuffer(qr, {
+          type: 'png',
+          errorCorrectionLevel: 'M',
+          margin: 1,
+          scale: 6,
+        });
+
+        await telegram.sendPhoto(
           process.env.TELEGRAM_ADMIN_ID,
-          '📲 امسح هذا الكود لربط واتساب:\n\n' + qr
+          png,
+          { caption: '📲 امسح هذا الرمز لربط واتساب' }
         );
       } catch (e) {
-        logger.warn({ e }, 'فشل إرسال QR إلى تيليجرام');
+        logger.warn({ e }, 'فشل إرسال QR كصورة إلى تيليجرام — سنرسل النص كبديل');
+        try {
+          await telegram.sendMessage(
+            process.env.TELEGRAM_ADMIN_ID,
+            '📲 امسح هذا الكود لربط واتساب:\n\n' + qr
+          );
+        } catch (e2) {
+          logger.error({ e2 }, 'فشل إرسال QR نصاً أيضاً');
+        }
       }
     }
   });
