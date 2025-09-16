@@ -1,5 +1,5 @@
 // src/lib/wa-astra-auth.js
-import { BufferJSON, initAuthCreds } from 'baileys';
+import { BufferJSON, initAuthCreds } from '@whiskeysockets/baileys';
 import { getDoc, upsertDoc, deleteDoc } from './astra.js';
 import {
   ASTRA_CREDS_COLLECTION,
@@ -16,10 +16,14 @@ export async function astraAuthState() {
   try {
     const doc = await getDoc(ASTRA_CREDS_COLLECTION, 'creds');
     creds = dec(doc);
-  } catch {
+  } catch (e) {
+    logger.error({ err: e.message || e }, 'astraAuthState: create creds failed');
     creds = initAuthCreds();
-    try { await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds)); }
-    catch (e) { logger.warn({ e }, 'astraAuthState: create creds failed'); }
+    try {
+      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds));
+    } catch (e2) {
+      logger.error({ err: e2.message || e2 }, 'astraAuthState: save new creds failed');
+    }
   }
 
   const keys = {
@@ -30,7 +34,8 @@ export async function astraAuthState() {
         try {
           const doc = await getDoc(ASTRA_KEYS_COLLECTION, keyId);
           out[id] = dec(doc)?.value;
-        } catch {
+        } catch (e) {
+          logger.warn({ err: e.message || e, keyId }, 'astraAuthState: get key failed');
           out[id] = undefined;
         }
       }));
@@ -43,9 +48,17 @@ export async function astraAuthState() {
           const val = data[type][id];
           const keyId = `${type}-${id}`;
           if (val == null) {
-            ops.push(deleteDoc(ASTRA_KEYS_COLLECTION, keyId).catch(() => null));
+            ops.push(
+              deleteDoc(ASTRA_KEYS_COLLECTION, keyId).catch((e) =>
+                logger.warn({ err: e.message || e, keyId }, 'astraAuthState: delete key failed')
+              )
+            );
           } else {
-            ops.push(upsertDoc(ASTRA_KEYS_COLLECTION, keyId, { value: enc(val) }).catch(() => null));
+            ops.push(
+              upsertDoc(ASTRA_KEYS_COLLECTION, keyId, { value: enc(val) }).catch((e) =>
+                logger.warn({ err: e.message || e, keyId }, 'astraAuthState: upsert key failed')
+              )
+            );
           }
         }
       }
@@ -54,8 +67,11 @@ export async function astraAuthState() {
   };
 
   async function saveCreds() {
-    try { await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds)); }
-    catch (e) { logger.warn({ e }, 'saveCreds failed'); }
+    try {
+      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', enc(creds));
+    } catch (e) {
+      logger.error({ err: e.message || e }, 'saveCreds failed');
+    }
   }
 
   return { state: { creds, keys }, saveCreds };
