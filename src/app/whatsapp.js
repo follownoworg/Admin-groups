@@ -43,12 +43,13 @@ export async function createWhatsApp({ telegram } = {}) {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // ===== منع التوازي والتكرار =====
-  let pairingSent = false;      // أُرسِل كود بنجاح
-  let pairingInFlight = false;  // طلب جارٍ الآن
-  let triedAfterOpen = false;   // لا نعيد بعد أول open
+  // ===== إرسال رمز الاقتران: مرة واحدة، دون توازي، مع ارتداد على 428 =====
+  let pairingSent = false;
+  let pairingInFlight = false;
+  let triedAfterOpen = false;
+  let scheduledFromConnecting = false;
 
-  async function sendPairingCodeOnceAfterOpen() {
+  async function sendPairingCodeOnce() {
     if (pairingSent || pairingInFlight) return;
     if (!WA_PAIRING_CODE) { logger.info('pairing: WA_PAIRING_CODE=0, skip'); return; }
     if (!WA_PHONE)       { logger.warn('pairing: WA_PHONE missing'); return; }
@@ -57,48 +58,57 @@ export async function createWhatsApp({ telegram } = {}) {
 
     pairingInFlight = true;
     const phone = String(WA_PHONE).replace(/[^0-9]/g, '');
-    try {
-      const code = await sock.requestPairingCode(phone); // يجب أن تُستدعى بعد open
-      await telegram.sendMessage(
-        TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID,
-        `🔐 رمز ربط واتساب: ${code}\nادخل الرمز في: واتساب ▶ الإعدادات ▶ الأجهزة المرتبطة ▶ ربط جهاز ▶ إدخال رمز`
-      );
-      logger.info({ code }, 'pairing code sent to Telegram');
-      pairingSent = true; // أي طلب لاحق يُمنع
-    } catch (e) {
-      const status = e?.output?.statusCode;
-      const msg = e?.output?.payload?.message || e?.message || String(e);
-      logger.warn({ status, msg }, 'requestPairingCode failed after open');
-      // محاولة احتياطية واحدة بعد 2s فقط إذا لم يُرسل شيء
-      if (!pairingSent && !triedAfterOpen) {
-        triedAfterOpen = true;
-        setTimeout(() => {
-          pairingInFlight = false;
-          sendPairingCodeOnceAfterOpen().catch(()=>{});
-        }, Number(process.env.WA_PAIRING_RETRY_DELAY_MS || 2000));
-        return;
+    const maxTries = Number(process.env.WA_PAIRING_RETRIES || 5);
+    const delayMs  = Number(process.env.WA_PAIRING_RETRY_DELAY_MS || 2000);
+
+    for (let i = 1; i <= maxTries; i++) {
+      try {
+        const code = await sock.requestPairingCode(phone);
+        await telegram.sendMessage(
+          TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID,
+          `🔐 رمز ربط واتساب: ${code}\nادخل الرمز في: واتساب ▶ الإعدادات ▶ الأجهزة المرتبطة ▶ ربط جهاز ▶ إدخال رمز`
+        );
+        logger.info({ code }, 'pairing code sent to Telegram');
+        pairingSent = true;
+        break;
+      } catch (e) {
+        const status = e?.output?.statusCode;
+        const msg = e?.output?.payload?.message || e?.message || String(e);
+        logger.warn({ attempt: i, status, msg }, 'requestPairingCode failed');
+        if (status === 428 || /Connection Closed/i.test(msg)) {
+          if (i < maxTries) await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+        break; // أخطاء أخرى لا نكرر عليها
       }
-    } finally {
-      pairingInFlight = false;
     }
+    pairingInFlight = false;
   }
 
-  sock.ev.on('connection.update', async (u) => {
+  sock.ev.on('connection.update', (u) => {
     const { connection, lastDisconnect } = u || {};
     const reason = lastDisconnect?.error?.message || '';
     logger.info({ connection, lastDisconnectReason: reason }, 'WA connection.update');
 
-    // أرسل الكود مرة واحدة فقط بعد أول open
+    // جرّب مرة واحدة مؤجّلة عند connecting لتجنّب 428 في البداية
+    if (connection === 'connecting' && !scheduledFromConnecting && !pairingSent) {
+      scheduledFromConnecting = true;
+      setTimeout(() => sendPairingCodeOnce().catch(() => {}), 1500);
+    }
+
+    // المحاولة الأساسية بعد أول open فقط، مع منع التكرار
     if (connection === 'open' && !pairingSent && !triedAfterOpen) {
-      triedAfterOpen = true; // امنع استدعاءً ثانياً من أي open لاحق
-      sendPairingCodeOnceAfterOpen().catch(e => logger.warn({ e }, 'pairing send after open failed'));
+      triedAfterOpen = true;
+      sendPairingCodeOnce().catch(e => logger.warn({ e }, 'pairing send after open failed'));
     }
 
     // جلسة تالفة؟ صفّر وأعد التشغيل
     if (/reading 'public'/.test(reason) || /noise/i.test(reason)) {
-      try { await resetCreds?.(); logger.warn('⚠️ Creds corrupt. Reset. Restarting...'); }
-      catch (e) { logger.warn({ e }, 'resetCreds failed'); }
-      finally { process.exit(0); }
+      (async () => {
+        try { await resetCreds?.(); logger.warn('⚠️ Creds corrupt. Reset. Restarting...'); }
+        catch (e) { logger.warn({ e }, 'resetCreds failed'); }
+        finally { process.exit(0); }
+      })();
     }
   });
 
@@ -127,4 +137,4 @@ export async function createWhatsApp({ telegram } = {}) {
 
   registerSelfHeal(sock, { messageStore });
   return sock;
-  }
+}
