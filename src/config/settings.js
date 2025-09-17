@@ -11,9 +11,7 @@ export const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '';
 export const TELEGRAM_ADMIN_ID = (process.env.TELEGRAM_ADMIN_ID || '').trim();
 
 // ====== WhatsApp Pairing via Phone ======
-// ضع 1 لتفعيل أسلوب الربط برقم الهاتف وإرسال كود من 8 أحرف إلى تيليجرام
 export const WA_PAIRING_CODE = String(process.env.WA_PAIRING_CODE || '0') === '1';
-// رقم الهاتف بدون علامة + وبالشكل الدولي، مثال: 9677XXXXXXXX
 export const WA_PHONE = (process.env.WA_PHONE || '').replace(/[^0-9]/g, '');
 
 // عنوان عام للخدمة (للوِبهـوك). استخدم PUBLIC_URL أو RENDER_EXTERNAL_URL من Render
@@ -49,7 +47,7 @@ export const ASTRA_DB_APPLICATION_TOKEN =
 export const ASTRA_DB_KEYSPACE =
   (process.env.ASTRA_DB_KEYSPACE || process.env.ASTRA_NAMESPACE || 'whatsappbot').trim();
 
-// أسماء الكولكشن (الطريقة الجديدة)
+// أسماء الكولكشن
 export const ASTRA_CREDS_COLLECTION  = (process.env.ASTRA_CREDS_COLLECTION  || 'creds').trim();
 export const ASTRA_KEYS_COLLECTION   = (process.env.ASTRA_KEYS_COLLECTION   || 'keys').trim();
 export const ASTRA_BANNED_COLLECTION = (process.env.ASTRA_BANNED_COLLECTION || 'banned').trim();
@@ -58,7 +56,7 @@ export const ASTRA_LOCKS_COLLECTION  = (process.env.ASTRA_LOCKS_COLLECTION  || '
 // نستخدم Astra فقط للتوثيق/المفاتيح
 export const USE_ASTRA_AUTH = true;
 
-// مُؤشّر جاهزية لمساعدة التشخيص باللوغ
+// مُؤشّر جاهزية
 export const ASTRA_READY = Boolean(
   ASTRA_DB_API_ENDPOINT &&
   ASTRA_DB_APPLICATION_TOKEN &&
