@@ -10,6 +10,12 @@ export const PORT = Number(process.env.PORT) || 3000;
 export const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '';
 export const TELEGRAM_ADMIN_ID = (process.env.TELEGRAM_ADMIN_ID || '').trim();
 
+// ====== WhatsApp Pairing via Phone ======
+// ضع 1 لتفعيل أسلوب الربط برقم الهاتف وإرسال كود من 8 أحرف إلى تيليجرام
+export const WA_PAIRING_CODE = String(process.env.WA_PAIRING_CODE || '0') === '1';
+// رقم الهاتف بدون علامة + وبالشكل الدولي، مثال: 9677XXXXXXXX
+export const WA_PHONE = (process.env.WA_PHONE || '').replace(/[^0-9]/g, '');
+
 // عنوان عام للخدمة (للوِبهـوك). استخدم PUBLIC_URL أو RENDER_EXTERNAL_URL من Render
 export const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
 
