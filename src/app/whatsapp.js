@@ -6,8 +6,7 @@ import { astraAuthState } from '../lib/wa-astra-auth.js';
 import { WA_PAIRING_CODE, WA_PHONE, TELEGRAM_ADMIN_ID } from '../config/settings.js';
 import { registerSelfHeal } from '../lib/selfheal.js';
 
-// مخزن رسائل بسيط (لدعم retries)
-const messageStore = new Map(); // key: msg.key.id -> proto
+const messageStore = new Map();
 const MAX_STORE = Number(process.env.WA_MESSAGE_STORE_MAX || 5000);
 
 function storeMessage(msg) {
@@ -32,7 +31,7 @@ export async function createWhatsApp({ telegram } = {}) {
   const sock = makeWASocket({
     version,
     auth: state,
-    // لا نطبع QR أبداً. نستخدم pairing code نصي فقط.
+    // لا نطبع QR أبداً
     printQRInTerminal: false,
     logger,
     emitOwnEvents: false,
@@ -44,10 +43,9 @@ export async function createWhatsApp({ telegram } = {}) {
     shouldIgnoreJid: (jid) => jid === 'status@broadcast',
   });
 
-  // حفظ الجلسة
   sock.ev.on('creds.update', saveCreds);
 
-  // ——— طلب كود الاقتران بعد فتح الاتصال ———
+  // طلب كود الاقتران بعد فتح الاتصال + إعادة محاولة على 428
   let pairingSent = false;
   async function sendPairingCodeWithRetry() {
     if (pairingSent) return;
@@ -55,8 +53,8 @@ export async function createWhatsApp({ telegram } = {}) {
     if (!telegram || !(TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID)) return;
 
     const phone = String(WA_PHONE).replace(/[^0-9]/g, '');
-    const tries = Number(process.env.WA_PAIRING_RETRIES || 3);
-    const waitMs = Number(process.env.WA_PAIRING_RETRY_DELAY_MS || 1500);
+    const tries = Number(process.env.WA_PAIRING_RETRIES || 5);
+    const waitMs = Number(process.env.WA_PAIRING_RETRY_DELAY_MS || 2000);
 
     for (let i = 1; i <= tries; i++) {
       try {
@@ -69,33 +67,29 @@ export async function createWhatsApp({ telegram } = {}) {
         pairingSent = true;
         return;
       } catch (e) {
-        const msg = e?.output?.payload?.message || e?.message || String(e);
-        logger.warn({ attempt: i, e: e?.output || e }, 'requestPairingCode failed');
-        // 428 = Connection Closed -> انتظر ثم أعد المحاولة بعد فتح القناة
-        if (String(msg).includes('Connection Closed') || e?.output?.statusCode === 428) {
+        const status = e?.output?.statusCode;
+        const msg = e?.output?.payload?.message || e?.message || '';
+        logger.warn({ attempt: i, status, msg }, 'requestPairingCode failed');
+        if (status === 428 || /Connection Closed/i.test(msg)) {
           await new Promise(r => setTimeout(r, waitMs));
           continue;
         }
-        // أخطاء أخرى لا نكرر عليها كثيراً
         if (i === tries) throw e;
       }
     }
   }
 
-  // مراقبة الاتصال + معالجة الجلسة التالفة
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect } = u || {};
     const reason = lastDisconnect?.error?.message || '';
     logger.info({ connection, lastDisconnectReason: reason }, 'WA connection.update');
 
-    // عند فتح الاتصال لأول مرة نرسل كود الاقتران
     if (connection === 'open') {
       try { await sendPairingCodeWithRetry(); } catch (e) {
         logger.warn({ e }, 'failed to send pairing code after open');
       }
     }
 
-    // جلسة تالفة
     if (/reading 'public'/.test(reason) || /noise/i.test(reason)) {
       try {
         await resetCreds?.();
@@ -108,7 +102,6 @@ export async function createWhatsApp({ telegram } = {}) {
     }
   });
 
-  // تخزين الرسائل الجديدة
   sock.ev.on('messages.upsert', ({ messages }) => {
     for (const m of messages || []) {
       if (m?.key?.remoteJid === 'status@broadcast') continue;
@@ -116,7 +109,6 @@ export async function createWhatsApp({ telegram } = {}) {
     }
   });
 
-  // retries عند فشل فك التشفير
   sock.ev.on('messages.update', async (updates) => {
     for (const u of updates || []) {
       try {
@@ -124,11 +116,8 @@ export async function createWhatsApp({ telegram } = {}) {
         const needsResync =
           u.update?.retry || u.update?.status === 409 || u.update?.status === 410;
         if (needsResync) {
-          try {
-            await sock.resyncAppState?.(['critical_unblock_low']);
-          } catch (e) {
-            logger.warn({ e }, 'فشل resyncAppState');
-          }
+          try { await sock.resyncAppState?.(['critical_unblock_low']); }
+          catch (e) { logger.warn({ e }, 'فشل resyncAppState'); }
         }
       } catch (e) {
         logger.warn({ e, u }, 'خطأ في messages.update');
@@ -136,8 +125,6 @@ export async function createWhatsApp({ telegram } = {}) {
     }
   });
 
-  // تعافٍ ذاتي بسيط
   registerSelfHeal(sock, { messageStore });
-
   return sock;
 }
