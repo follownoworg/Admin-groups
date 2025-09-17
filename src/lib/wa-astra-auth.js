@@ -1,106 +1,149 @@
-// src/lib/wa-astra-auth.js
-import { BufferJSON, initAuthCreds } from 'baileys';
-import { getDoc, upsertDoc, deleteDoc } from './astra.js';
-import {
-  ASTRA_CREDS_COLLECTION,
-  ASTRA_KEYS_COLLECTION
-} from '../config/settings.js';
-import logger from './logger.js';
+// src/app/whatsapp.js
+import { makeWASocket, fetchLatestBaileysVersion } from 'baileys';
+import NodeCache from 'node-cache';
+import logger from '../lib/logger.js';
+import { astraAuthState } from '../lib/wa-astra-auth.js';
+import { WA_PAIRING_CODE, WA_PHONE, TELEGRAM_ADMIN_ID } from '../config/settings.js';
+import { registerSelfHeal } from '../lib/selfheal.js';
 
-const enc = (x) => JSON.parse(JSON.stringify(x, BufferJSON.replacer));
-const dec = (x) => JSON.parse(JSON.stringify(x), BufferJSON.reviver);
-
-// بعض دوال Astra قد تُرجع { value: {...} } أو ترجع الوثيقة مباشرة.
-// لذلك نفك التغليف إن وجد:
-function unwrap(doc) {
-  if (!doc) return null;
-  return (Object.prototype.hasOwnProperty.call(doc, 'value') ? doc.value : doc);
-}
-
-// فحص أن الـ creds تبدو سليمة (وجود noiseKey وغيره)
-function credsLooksValid(c) {
-  try {
-    return Boolean(c?.noiseKey?.public && c?.noiseKey?.private && c?.signedIdentityKey?.public);
-  } catch {
-    return false;
+// ——— مخزن رسائل بسيط (لدعم retries) ———
+const messageStore = new Map(); // key: msg.key.id -> proto
+const MAX_STORE = Number(process.env.WA_MESSAGE_STORE_MAX || 5000);
+function storeMessage(msg) {
+  if (!msg?.key?.id) return;
+  if (messageStore.size >= MAX_STORE) {
+    const firstKey = messageStore.keys().next().value;
+    if (firstKey) messageStore.delete(firstKey);
   }
+  messageStore.set(msg.key.id, msg);
 }
 
-export async function astraAuthState() {
-  // --------- تحميل/إنشاء creds ----------
-  let creds;
+// ——— قفل منع التكرار والتوازي ———
+let pairingSent = false;       // تم إرسال كود صالح
+let pairingInFlight = false;   // طلب جارٍ الآن
+let cooledDownUntil = 0;       // منع إعادة الطلب قبل انتهاء التبريد (ms)
+
+// ——— دالة إرسال الكود: طلب واحد فقط بعد OPEN مع تبريد ———
+async function sendPairingCodeOnce(sock, telegram, state) {
+  const now = Date.now();
+  if (pairingSent || pairingInFlight || now < cooledDownUntil) return;
+
+  if (String(process.env.WA_PAIRING_CODE || (WA_PAIRING_CODE ? '1' : '0')) !== '1') return;
+  const adminId = TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID;
+  if (!adminId) { logger.warn('pairing: no TELEGRAM_ADMIN_ID'); return; }
+  if (state?.creds?.registered) { logger.info('pairing: already registered, skip'); return; }
+
+  const phone = String(WA_PHONE || '').replace(/\D/g, '');
+  if (!phone) { logger.warn('pairing: WA_PHONE missing'); return; }
+
+  pairingInFlight = true;
   try {
-    const doc = await getDoc(ASTRA_CREDS_COLLECTION, 'creds'); // قد تُرمى 404
-    const raw = unwrap(doc);
-    const maybe = dec(raw);
-    if (credsLooksValid(maybe)) {
-      creds = maybe;
-    } else {
-      throw new Error('creds invalid/corrupt');
-    }
+    logger.info({ phone }, 'requesting pairing code');
+    const code = await sock.requestPairingCode(phone);
+
+    await telegram?.sendMessage?.(
+      adminId,
+      `🔐 رمز ربط واتساب: ${code}\nادخل الرمز في: الإعدادات ▶ الأجهزة المرتبطة ▶ ربط جهاز ▶ إدخال رمز`
+    );
+
+    pairingSent = true;
+    // إبقاء العملية حيّة قليلًا حتى تُدخِل الرمز
+    setTimeout(() => {}, 120_000);
+    logger.info({ code }, 'pairing code sent to Telegram');
   } catch (e) {
-    logger.warn({ msg: 'creating fresh creds', reason: e?.message }, 'astraAuthState');
-    creds = initAuthCreds();
-    try {
-      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', { value: enc(creds) });
-    } catch (err) {
-      logger.warn({ err }, 'astraAuthState: create creds failed');
+    const status = e?.output?.statusCode;
+    const msg = e?.output?.payload?.message || e?.message || String(e);
+    logger.warn({ status, msg }, 'requestPairingCode failed');
+    // 428/Connection Closed → تبريد قصير ثم محاولة لاحقة واحدة فقط عند open التالي
+    if (status === 428 || /Connection Closed/i.test(msg)) {
+      cooledDownUntil = Date.now() + Number(process.env.WA_PAIRING_RETRY_DELAY_MS || 3000);
+    } else {
+      cooledDownUntil = Date.now() + 15000;
     }
+  } finally {
+    pairingInFlight = false;
   }
+}
 
-  // --------- تخزين المفاتيح ----------
-  const keys = {
-    async get(type, ids) {
-      const out = {};
-      await Promise.all((ids || []).map(async (id) => {
-        const keyId = `${type}-${id}`;
-        try {
-          const doc = await getDoc(ASTRA_KEYS_COLLECTION, keyId);
-          const raw = unwrap(doc);
-          out[id] = dec(raw)?.value ?? dec(raw); // دعم الشكلين
-        } catch {
-          out[id] = undefined;
+export async function createWhatsApp({ telegram } = {}) {
+  const { state, saveCreds, resetCreds } = await astraAuthState();
+  const { version } = await fetchLatestBaileysVersion();
+
+  const msgRetryCounterCache = new NodeCache({
+    stdTTL: Number(process.env.WA_RETRY_TTL || 3600),
+    checkperiod: Number(process.env.WA_RETRY_CHECK || 120),
+    useClones: false,
+  });
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: false, // لا QR مطلقًا
+    logger,
+    emitOwnEvents: false,
+    syncFullHistory: false,
+    shouldSyncHistoryMessage: () => false,
+    markOnlineOnConnect: false,
+    getMessage: async (key) => (key?.id ? messageStore.get(key.id) : undefined),
+    msgRetryCounterCache,
+    shouldIgnoreJid: (jid) => jid === 'status@broadcast',
+  });
+
+  // حفظ الجلسة
+  sock.ev.on('creds.update', saveCreds);
+
+  // مراقبة الاتصال
+  sock.ev.on('connection.update', async (u) => {
+    const { connection, lastDisconnect, node } = u || {};
+    const reason = lastDisconnect?.error?.message || '';
+    logger.info({ connection, lastDisconnectReason: reason }, 'WA connection.update');
+
+    // تحقّق صارم من تطابق الرقم القادم من السيرفر إن توفر
+    if (node?.username && WA_PHONE && String(node.username) !== String(WA_PHONE)) {
+      logger.warn({ seen: node.username, expected: WA_PHONE }, 'phone mismatch -> skip pairing');
+      return;
+    }
+
+    // أرسل الكود مرة واحدة فقط بعد أول OPEN (لا نحاول في connecting)
+    if (connection === 'open') {
+      await sendPairingCodeOnce(sock, telegram, state);
+    }
+
+    // جلسة تالفة؟ صفّر وأعد التشغيل
+    if (/reading 'public'/.test(reason) || /noise/i.test(reason)) {
+      try { await resetCreds?.(); logger.warn('⚠️ Creds corrupt. Reset. Restarting...'); }
+      catch (e) { logger.warn({ e }, 'resetCreds failed'); }
+      finally { process.exit(0); }
+    }
+  });
+
+  // تخزين الرسائل الجديدة
+  sock.ev.on('messages.upsert', ({ messages }) => {
+    for (const m of messages || []) {
+      if (m?.key?.remoteJid === 'status@broadcast') continue;
+      storeMessage(m);
+    }
+  });
+
+  // retries عند فشل فك التشفير
+  sock.ev.on('messages.update', async (updates) => {
+    for (const u of updates || []) {
+      try {
+        if (u?.key?.remoteJid === 'status@broadcast') continue;
+        const needsResync =
+          u.update?.retry || u.update?.status === 409 || u.update?.status === 410;
+        if (needsResync) {
+          try { await sock.resyncAppState?.(['critical_unblock_low']); }
+          catch (e) { logger.warn({ e }, 'فشل resyncAppState'); }
         }
-      }));
-      return out;
-    },
-    async set(data) {
-      const ops = [];
-      for (const type of Object.keys(data || {})) {
-        for (const id of Object.keys(data[type] || {})) {
-          const val = data[type][id];
-          const keyId = `${type}-${id}`;
-          if (val == null) {
-            ops.push(deleteDoc(ASTRA_KEYS_COLLECTION, keyId).catch(() => null));
-          } else {
-            // نخزّن دائماً تحت { value: ... } للاتساق
-            ops.push(upsertDoc(ASTRA_KEYS_COLLECTION, keyId, { value: enc(val) }).catch(() => null));
-          }
-        }
+      } catch (e) {
+        logger.warn({ e, u }, 'خطأ في messages.update');
       }
-      await Promise.all(ops);
     }
-  };
+  });
 
-  async function saveCreds() {
-    try {
-      await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', { value: enc(creds) });
-    } catch (e) {
-      logger.warn({ e }, 'saveCreds failed');
-    }
-  }
+  // تعافٍ ذاتي بسيط
+  registerSelfHeal(sock, { messageStore });
 
-  // API إضافي: حذف الجلسة وإعادة إنشائها (للاستشفاء من تلف الجلسة)
-  async function resetCreds() {
-    try { await deleteDoc(ASTRA_CREDS_COLLECTION, 'creds'); } catch {}
-    const fresh = initAuthCreds();
-    try { await upsertDoc(ASTRA_CREDS_COLLECTION, 'creds', { value: enc(fresh) }); } catch (e) {
-      logger.warn({ e }, 'resetCreds: upsert failed');
-    }
-    // مهم: نُحدّث نفس المرجع الذي مع Baileys
-    Object.assign(creds, fresh);
-    return fresh;
-  }
-
-  return { state: { creds, keys }, saveCreds, resetCreds };
+  return sock;
 }
