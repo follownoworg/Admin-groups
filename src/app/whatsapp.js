@@ -1,7 +1,6 @@
 // src/app/whatsapp.js
 import { makeWASocket, fetchLatestBaileysVersion } from 'baileys';
 import NodeCache from 'node-cache';
-import qrcode from 'qrcode';
 import logger from '../lib/logger.js';
 import { astraAuthState } from '../lib/wa-astra-auth.js';
 import { WA_PAIRING_CODE, WA_PHONE, TELEGRAM_ADMIN_ID } from '../config/settings.js';
@@ -21,25 +20,11 @@ function storeMessage(msg) {
 }
 
 export async function createWhatsApp({ telegram } = {}) {
-  // تهيئة الحالة (Astra)
   let state, saveCreds, resetCreds;
-  try {
-    const a = await astraAuthState();
-    state = a.state;
-    saveCreds = a.saveCreds;
-    resetCreds = a.resetCreds;
-  } catch (e) {
-    logger.error(
-      {
-        e: e instanceof Error ? { message: e.message, stack: e.stack } : e,
-        ASTRA_DB_API_ENDPOINT: process.env.ASTRA_DB_API_ENDPOINT,
-        ASTRA_DB_KEYSPACE: process.env.ASTRA_DB_KEYSPACE,
-        hasToken: Boolean(process.env.ASTRA_DB_APPLICATION_TOKEN),
-      },
-      '❌ Astra init failed. تأكد من ASTRA_DB_API_ENDPOINT / ASTRA_DB_APPLICATION_TOKEN / ASTRA_DB_KEYSPACE'
-    );
-    throw e;
-  }
+  const a = await astraAuthState();
+  state = a.state;
+  saveCreds = a.saveCreds;
+  resetCreds = a.resetCreds;
 
   const { version } = await fetchLatestBaileysVersion();
 
@@ -52,7 +37,8 @@ export async function createWhatsApp({ telegram } = {}) {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: !telegram && !WA_PAIRING_CODE, // عند تفعيل pairing code لا يطبع QR
+    // تعطيل طباعة الـ QR دائماً
+    printQRInTerminal: false,
     logger,
     emitOwnEvents: false,
     syncFullHistory: false,
@@ -66,11 +52,11 @@ export async function createWhatsApp({ telegram } = {}) {
   // حفظ الجلسة
   sock.ev.on('creds.update', saveCreds);
 
-  // ====== إرسال كود الاقتران عبر تيليجرام عند تفعيل وضع الربط برقم الهاتف ======
+  // إرسال كود الاقتران كنص إلى تيليجرام فقط
   try {
-    if (WA_PAIRING_CODE && WA_PHONE && !state?.creds?.registered) {
+    if (WA_PAIRING_CODE && WA_PHONE && !state?.creds?.registered && telegram) {
       const code = await sock.requestPairingCode(WA_PHONE);
-      await telegram?.sendMessage?.(
+      await telegram.sendMessage(
         TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID,
         `🔐 رمز ربط واتساب: ${code}\nادخل الرمز في: واتساب ▶ الإعدادات ▶ الأجهزة المرتبطة ▶ ربط جهاز ▶ إدخال رمز`
       );
@@ -80,68 +66,16 @@ export async function createWhatsApp({ telegram } = {}) {
     logger.warn({ e }, 'failed to request/send pairing code');
   }
 
-  // --- إرسال QR لتيليجرام كصورة مع حماية من التكرار ---
-  let lastQr = '';
-  let lastQrTs = 0;
-  const QR_DEBOUNCE_MS = 10_000; // لا نرسل أكثر من مرّة كل 10 ثواني
-
-  async function sendQrToTelegram(qr) {
-    if (!qr) return;
-    const now = Date.now();
-    if (qr === lastQr && now - lastQrTs < QR_DEBOUNCE_MS) {
-      return; // نفس الكود أُرسل للتو
-    }
-    lastQr = qr;
-    lastQrTs = now;
-
-    try {
-      if (telegram?.sendQR) {
-        await telegram.sendQR(qr);
-        logger.info('QR sent to Telegram via telegram.sendQR');
-        return;
-      }
-    } catch (e) {
-      logger.warn({ e }, 'telegram.sendQR failed, will fallback to local PNG');
-    }
-
-    try {
-      const png = await qrcode.toBuffer(qr, {
-        type: 'png',
-        errorCorrectionLevel: 'M',
-        margin: 1,
-        scale: 6,
-        width: 512,
-      });
-      await telegram?.sendPhoto?.(
-        process.env.TELEGRAM_ADMIN_ID,
-        png,
-        { caption: '📲 امسح هذا الرمز لربط واتساب' }
-      );
-      logger.info('QR PNG sent to Telegram (fallback path)');
-    } catch (e) {
-      logger.warn({ e }, 'فشل إرسال QR كصورة إلى تيليجرام — سنحاول كنص');
-      try {
-        await telegram?.sendMessage?.(
-          process.env.TELEGRAM_ADMIN_ID,
-          '📲 امسح هذا الكود لربط واتساب:\n\n' + qr
-        );
-        logger.info('QR TEXT sent to Telegram (fallback of fallback)');
-      } catch (e2) {
-        logger.error({ e2 }, 'فشل إرسال QR نصاً أيضاً');
-      }
-    }
-  }
-
-  // مراقبة الاتصال + إرسال QR + استشفاء الجلسة التالفة
+  // مراقبة الاتصال + استشفاء الجلسة التالفة
   sock.ev.on('connection.update', async (u) => {
-    const { connection, lastDisconnect, qr } = u || {};
+    const { connection, lastDisconnect } = u || {};
     const reason = lastDisconnect?.error?.message || '';
     logger.info(
-      { connection, lastDisconnectReason: reason, hasQR: Boolean(qr) },
+      { connection, lastDisconnectReason: reason },
       'WA connection.update'
     );
 
-    // لو الجلسة تالفة (noiseKey.public undefined) — احذف creds وأنهِ البروسس ليُعاد التشغيل بجلسة جديدة
+    // لو الجلسة تالفة (noiseKey.public undefined) — احذف creds وأنهِ البروسس
     if (/reading 'public'/.test(reason) || /noise/i.test(reason)) {
       try {
         await resetCreds?.();
@@ -151,10 +85,6 @@ export async function createWhatsApp({ telegram } = {}) {
       } finally {
         process.exit(0);
       }
-    }
-
-    if (qr && telegram && !WA_PAIRING_CODE) {
-      await sendQrToTelegram(qr);
     }
   });
 
