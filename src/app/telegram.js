@@ -6,8 +6,8 @@ import { TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, PUBLIC_URL } from '../config/setting
 let bot = null;
 
 /**
- * يشغّل بوت تيليجرام ويثبت webhook على نفس مسارك /tg-webhook/<TOKEN>
- * يقبل app من Express ليعالج POST الوارد من تيليجرام.
+ * يشغّل بوت تيليجرام ويثبت webhook على: /tg-webhook/<TOKEN>
+ * يتوقع أن يكون Express مفعلاً لـ express.json()
  */
 export function startTelegram(app) {
   if (!TELEGRAM_TOKEN) {
@@ -20,11 +20,12 @@ export function startTelegram(app) {
   bot = b;
 
   if (useWebhook) {
-    const url = PUBLIC_URL.replace(/\/+$/, '') + `/tg-webhook/${TELEGRAM_TOKEN}`;
-    // مسار الويبهوك على نفس الخادم
+    const base = PUBLIC_URL.replace(/\/+$/, '');
+    const path = `/tg-webhook/${TELEGRAM_TOKEN}`;
+    const url  = `${base}${path}`;
+
     if (app && typeof app.post === 'function') {
-      app.post(`/tg-webhook/:token`, (req, res) => {
-        if (req.params.token !== TELEGRAM_TOKEN) return res.sendStatus(403);
+      app.post(path, (req, res) => {
         try {
           b.processUpdate(req.body);
           res.sendStatus(200);
@@ -39,15 +40,15 @@ export function startTelegram(app) {
     logger.info('Telegram bot in polling mode');
   }
 
-  // أوامر أساسية للإدارة
+  // ——— أوامر الإدارة ———
   const helpText =
 `👋 أهلاً! أوامر الإدارة:
 • /help — هذه القائمة
 • /ping — فحص عمل البوت
-• /ban_list — عرض الكلمات المحظورة (إن وُجد مخزن)
-• /ban_add كلمة
-• /ban_remove كلمة
-• /ban_set ك1,ك2,ك3`;
+• /ban_list — عرض الكلمات المحظورة
+• /ban_add <كلمة> — إضافة كلمة محظورة
+• /ban_remove <كلمة> — إزالة كلمة محظورة
+• /ban_set ك1,ك2,ك3 — استبدال القائمة كاملة`;
 
   const isAdmin = (msg) => String(msg.chat?.id) === String(TELEGRAM_ADMIN_ID);
 
@@ -61,14 +62,14 @@ export function startTelegram(app) {
     b.sendMessage(msg.chat.id, 'pong');
   });
 
-  // دعم اختياري لقائمة كلمات محظورة إن وُجد store عالمي
+  // مخزن الكلمات المحظورة اختياري (يُضبط خارجياً)
   let store = null;
   try { store = globalThis.__bannedWordsStore; } catch {}
 
   b.onText(/^\/ban_list$/i, async (msg) => {
     if (!isAdmin(msg) || !store) return;
     const words = await store.listBanned();
-    b.sendMessage(msg.chat.id, `🚫 القائمة:\n• ${words.join('\n• ')}`);
+    b.sendMessage(msg.chat.id, words.length ? `🚫 القائمة:\n• ${words.join('\n• ')}` : '🚫 القائمة فارغة.');
   });
 
   b.onText(/^\/ban_add\s+(.+)$/i, async (msg, m) => {
@@ -94,4 +95,3 @@ export function startTelegram(app) {
 
   return b;
 }
-```0
