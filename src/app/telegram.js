@@ -1,4 +1,5 @@
 // src/app/telegram.js
+import express from 'express';
 import TelegramBot from 'node-telegram-bot-api';
 import logger from '../lib/logger.js';
 import { TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, PUBLIC_URL } from '../config/settings.js';
@@ -6,8 +7,8 @@ import { TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, PUBLIC_URL } from '../config/setting
 let bot = null;
 
 /**
- * يشغّل بوت تيليجرام ويثبت webhook على: /tg-webhook/<TOKEN>
- * يتوقع أن يكون Express مفعلاً لـ express.json()
+ * Webhook: /tg-webhook/<TOKEN>
+ * يتطلب تمرير app من express في index.js:  startTelegram(app)
  */
 export function startTelegram(app) {
   if (!TELEGRAM_TOKEN) {
@@ -24,18 +25,25 @@ export function startTelegram(app) {
     const path = `/tg-webhook/${TELEGRAM_TOKEN}`;
     const url  = `${base}${path}`;
 
+    // فك JSON لهذا المسار تحديدًا
     if (app && typeof app.post === 'function') {
-      app.post(path, (req, res) => {
+      app.post(path, express.json({ limit: '2mb' }), (req, res) => {
         try {
+          if (!req.body || typeof req.body !== 'object') {
+            logger.warn({ bodyType: typeof req.body }, 'telegram webhook: empty/invalid body');
+            return res.sendStatus(400);
+          }
           b.processUpdate(req.body);
           res.sendStatus(200);
         } catch (e) {
-          logger.warn({ e }, 'telegram processUpdate error');
+          logger.warn({ e, body: req.body }, 'telegram processUpdate error');
           res.sendStatus(500);
         }
       });
     }
-    b.setWebHook(url).then(() => logger.info({ url }, 'Telegram webhook set'));
+
+    b.setWebHook(url, { drop_pending_updates: true })
+      .then(() => logger.info({ url }, 'Telegram webhook set'));
   } else {
     logger.info('Telegram bot in polling mode');
   }
@@ -46,9 +54,9 @@ export function startTelegram(app) {
 • /help — هذه القائمة
 • /ping — فحص عمل البوت
 • /ban_list — عرض الكلمات المحظورة
-• /ban_add <كلمة> — إضافة كلمة محظورة
-• /ban_remove <كلمة> — إزالة كلمة محظورة
-• /ban_set ك1,ك2,ك3 — استبدال القائمة كاملة`;
+• /ban_add <كلمة>
+• /ban_remove <كلمة>
+• /ban_set ك1,ك2,ك3`;
 
   const isAdmin = (msg) => String(msg.chat?.id) === String(TELEGRAM_ADMIN_ID);
 
@@ -62,14 +70,14 @@ export function startTelegram(app) {
     b.sendMessage(msg.chat.id, 'pong');
   });
 
-  // مخزن الكلمات المحظورة اختياري (يُضبط خارجياً)
+  // أوامر محظورات اختيارية إن وُجد store خارجي
   let store = null;
   try { store = globalThis.__bannedWordsStore; } catch {}
 
   b.onText(/^\/ban_list$/i, async (msg) => {
     if (!isAdmin(msg) || !store) return;
     const words = await store.listBanned();
-    b.sendMessage(msg.chat.id, words.length ? `🚫 القائمة:\n• ${words.join('\n• ')}` : '🚫 القائمة فارغة.');
+    b.sendMessage(msg.chat.id, words?.length ? `🚫 القائمة:\n• ${words.join('\n• ')}` : '🚫 القائمة فارغة.');
   });
 
   b.onText(/^\/ban_add\s+(.+)$/i, async (msg, m) => {
@@ -92,6 +100,19 @@ export function startTelegram(app) {
     const words = await store.setBanned(list);
     b.sendMessage(msg.chat.id, `✏️ تم الاستبدال. القائمة الآن:\n• ${words.join('\n• ')}`);
   });
+
+  // مسار فحص سريع يدوي (اختياري): GET /tg-test
+  if (app && typeof app.get === 'function') {
+    app.get('/tg-test', async (_req, res) => {
+      try {
+        await b.sendMessage(TELEGRAM_ADMIN_ID, '✅ Webhook OK');
+        res.json({ ok: true });
+      } catch (e) {
+        logger.warn({ e }, 'tg-test failed');
+        res.status(500).json({ ok: false });
+      }
+    });
+  }
 
   return b;
 }
