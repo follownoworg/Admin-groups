@@ -31,7 +31,7 @@ export async function createWhatsApp({ telegram } = {}) {
   const sock = makeWASocket({
     version,
     auth: state,
-    // لا نطبع QR أبداً
+    // لا QR مطلقًا
     printQRInTerminal: false,
     logger,
     emitOwnEvents: false,
@@ -45,18 +45,23 @@ export async function createWhatsApp({ telegram } = {}) {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // طلب كود الاقتران بعد فتح الاتصال + إعادة محاولة على 428
+  // إرسال كود الاقتران كنص إلى تيليجرام مع إعادة المحاولة
   let pairingSent = false;
+  let pairingTried = 0;
+
   async function sendPairingCodeWithRetry() {
     if (pairingSent) return;
-    if (!WA_PAIRING_CODE || !WA_PHONE || state?.creds?.registered) return;
-    if (!telegram || !(TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID)) return;
+    if (!WA_PAIRING_CODE) { logger.info('pairing: WA_PAIRING_CODE=0, skip'); return; }
+    if (!WA_PHONE)       { logger.warn('pairing: WA_PHONE missing'); return; }
+    if (state?.creds?.registered) { logger.info('pairing: already registered, skip'); return; }
+    if (!telegram || !(TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID)) { logger.warn('pairing: no telegram admin'); return; }
 
     const phone = String(WA_PHONE).replace(/[^0-9]/g, '');
-    const tries = Number(process.env.WA_PAIRING_RETRIES || 5);
+    const tries = Number(process.env.WA_PAIRING_RETRIES || 10);
     const waitMs = Number(process.env.WA_PAIRING_RETRY_DELAY_MS || 2000);
 
-    for (let i = 1; i <= tries; i++) {
+    while (!pairingSent && pairingTried < tries) {
+      pairingTried++;
       try {
         const code = await sock.requestPairingCode(phone);
         await telegram.sendMessage(
@@ -68,26 +73,40 @@ export async function createWhatsApp({ telegram } = {}) {
         return;
       } catch (e) {
         const status = e?.output?.statusCode;
-        const msg = e?.output?.payload?.message || e?.message || '';
-        logger.warn({ attempt: i, status, msg }, 'requestPairingCode failed');
+        const msg = e?.output?.payload?.message || e?.message || String(e);
+        logger.warn({ attempt: pairingTried, status, msg }, 'requestPairingCode failed');
+        // 428 / Connection Closed: انتظر ثم أعد
         if (status === 428 || /Connection Closed/i.test(msg)) {
           await new Promise(r => setTimeout(r, waitMs));
           continue;
         }
-        if (i === tries) throw e;
+        // أخطاء أخرى: تكرار محدود ثم توقف
+        if (pairingTried >= tries) {
+          logger.warn('pairing: gave up after max retries');
+          return;
+        }
+        await new Promise(r => setTimeout(r, waitMs));
       }
     }
   }
 
+  // استدعِ الإرسال عند أول تحديث اتصال، وأيضًا عند open إن حدث
+  let firstUpdateDone = false;
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect } = u || {};
     const reason = lastDisconnect?.error?.message || '';
     logger.info({ connection, lastDisconnectReason: reason }, 'WA connection.update');
 
+    if (!firstUpdateDone) {
+      firstUpdateDone = true;
+      // حاوِل فورًا دون انتظار open
+      sendPairingCodeWithRetry().catch(e => logger.warn({ e }, 'pairing immediate attempt failed'));
+      // وجرب مرة ثانية بعد مهلة قصيرة ضمانًا لجهوزية القناة
+      setTimeout(() => sendPairingCodeWithRetry().catch(() => {}), 2500);
+    }
+
     if (connection === 'open') {
-      try { await sendPairingCodeWithRetry(); } catch (e) {
-        logger.warn({ e }, 'failed to send pairing code after open');
-      }
+      sendPairingCodeWithRetry().catch(e => logger.warn({ e }, 'pairing after open failed'));
     }
 
     if (/reading 'public'/.test(reason) || /noise/i.test(reason)) {
