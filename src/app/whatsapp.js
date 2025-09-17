@@ -20,12 +20,7 @@ function storeMessage(msg) {
 }
 
 export async function createWhatsApp({ telegram } = {}) {
-  let state, saveCreds, resetCreds;
-  const a = await astraAuthState();
-  state = a.state;
-  saveCreds = a.saveCreds;
-  resetCreds = a.resetCreds;
-
+  const { state, saveCreds, resetCreds } = await astraAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
   const msgRetryCounterCache = new NodeCache({
@@ -37,7 +32,7 @@ export async function createWhatsApp({ telegram } = {}) {
   const sock = makeWASocket({
     version,
     auth: state,
-    // تعطيل طباعة الـ QR دائماً
+    // لا نطبع QR أبداً. نستخدم pairing code نصي فقط.
     printQRInTerminal: false,
     logger,
     emitOwnEvents: false,
@@ -52,30 +47,55 @@ export async function createWhatsApp({ telegram } = {}) {
   // حفظ الجلسة
   sock.ev.on('creds.update', saveCreds);
 
-  // إرسال كود الاقتران كنص إلى تيليجرام فقط
-  try {
-    if (WA_PAIRING_CODE && WA_PHONE && !state?.creds?.registered && telegram) {
-      const code = await sock.requestPairingCode(WA_PHONE);
-      await telegram.sendMessage(
-        TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID,
-        `🔐 رمز ربط واتساب: ${code}\nادخل الرمز في: واتساب ▶ الإعدادات ▶ الأجهزة المرتبطة ▶ ربط جهاز ▶ إدخال رمز`
-      );
-      logger.info({ code }, 'pairing code sent to Telegram');
+  // ——— طلب كود الاقتران بعد فتح الاتصال ———
+  let pairingSent = false;
+  async function sendPairingCodeWithRetry() {
+    if (pairingSent) return;
+    if (!WA_PAIRING_CODE || !WA_PHONE || state?.creds?.registered) return;
+    if (!telegram || !(TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID)) return;
+
+    const phone = String(WA_PHONE).replace(/[^0-9]/g, '');
+    const tries = Number(process.env.WA_PAIRING_RETRIES || 3);
+    const waitMs = Number(process.env.WA_PAIRING_RETRY_DELAY_MS || 1500);
+
+    for (let i = 1; i <= tries; i++) {
+      try {
+        const code = await sock.requestPairingCode(phone);
+        await telegram.sendMessage(
+          TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID,
+          `🔐 رمز ربط واتساب: ${code}\nادخل الرمز في: واتساب ▶ الإعدادات ▶ الأجهزة المرتبطة ▶ ربط جهاز ▶ إدخال رمز`
+        );
+        logger.info({ code }, 'pairing code sent to Telegram');
+        pairingSent = true;
+        return;
+      } catch (e) {
+        const msg = e?.output?.payload?.message || e?.message || String(e);
+        logger.warn({ attempt: i, e: e?.output || e }, 'requestPairingCode failed');
+        // 428 = Connection Closed -> انتظر ثم أعد المحاولة بعد فتح القناة
+        if (String(msg).includes('Connection Closed') || e?.output?.statusCode === 428) {
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        // أخطاء أخرى لا نكرر عليها كثيراً
+        if (i === tries) throw e;
+      }
     }
-  } catch (e) {
-    logger.warn({ e }, 'failed to request/send pairing code');
   }
 
-  // مراقبة الاتصال + استشفاء الجلسة التالفة
+  // مراقبة الاتصال + معالجة الجلسة التالفة
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect } = u || {};
     const reason = lastDisconnect?.error?.message || '';
-    logger.info(
-      { connection, lastDisconnectReason: reason },
-      'WA connection.update'
-    );
+    logger.info({ connection, lastDisconnectReason: reason }, 'WA connection.update');
 
-    // لو الجلسة تالفة (noiseKey.public undefined) — احذف creds وأنهِ البروسس
+    // عند فتح الاتصال لأول مرة نرسل كود الاقتران
+    if (connection === 'open') {
+      try { await sendPairingCodeWithRetry(); } catch (e) {
+        logger.warn({ e }, 'failed to send pairing code after open');
+      }
+    }
+
+    // جلسة تالفة
     if (/reading 'public'/.test(reason) || /noise/i.test(reason)) {
       try {
         await resetCreds?.();
