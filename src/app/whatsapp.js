@@ -4,6 +4,7 @@ import NodeCache from 'node-cache';
 import qrcode from 'qrcode';
 import logger from '../lib/logger.js';
 import { astraAuthState } from '../lib/wa-astra-auth.js';
+import { WA_PAIRING_CODE, WA_PHONE, TELEGRAM_ADMIN_ID } from '../config/settings.js';
 import { registerSelfHeal } from '../lib/selfheal.js';
 
 // مخزن رسائل بسيط (لدعم retries)
@@ -51,7 +52,7 @@ export async function createWhatsApp({ telegram } = {}) {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: !telegram, // لو ما فيه تيليجرام يطبع QR في اللوغ
+    printQRInTerminal: !telegram && !WA_PAIRING_CODE, // عند تفعيل pairing code لا يطبع QR
     logger,
     emitOwnEvents: false,
     syncFullHistory: false,
@@ -64,6 +65,20 @@ export async function createWhatsApp({ telegram } = {}) {
 
   // حفظ الجلسة
   sock.ev.on('creds.update', saveCreds);
+
+  // ====== إرسال كود الاقتران عبر تيليجرام عند تفعيل وضع الربط برقم الهاتف ======
+  try {
+    if (WA_PAIRING_CODE && WA_PHONE && !state?.creds?.registered) {
+      const code = await sock.requestPairingCode(WA_PHONE);
+      await telegram?.sendMessage?.(
+        TELEGRAM_ADMIN_ID || process.env.TELEGRAM_ADMIN_ID,
+        `🔐 رمز ربط واتساب: ${code}\nادخل الرمز في: واتساب ▶ الإعدادات ▶ الأجهزة المرتبطة ▶ ربط جهاز ▶ إدخال رمز`
+      );
+      logger.info({ code }, 'pairing code sent to Telegram');
+    }
+  } catch (e) {
+    logger.warn({ e }, 'failed to request/send pairing code');
+  }
 
   // --- إرسال QR لتيليجرام كصورة مع حماية من التكرار ---
   let lastQr = '';
@@ -134,12 +149,11 @@ export async function createWhatsApp({ telegram } = {}) {
       } catch (e) {
         logger.warn({ e }, 'resetCreds failed');
       } finally {
-        // نُنهي العملية ليرجع Render يشغّلها من جديد فتظهر QR جديدة
         process.exit(0);
       }
     }
 
-    if (qr && telegram) {
+    if (qr && telegram && !WA_PAIRING_CODE) {
       await sendQrToTelegram(qr);
     }
   });
