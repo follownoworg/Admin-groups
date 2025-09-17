@@ -23,31 +23,25 @@ const RAW_ENDPOINT = (process.env.ASTRA_DB_API_ENDPOINT || '').trim();
 const RAW_ID      = (process.env.ASTRA_DB_ID || '').trim();
 const RAW_REGION  = (process.env.ASTRA_DB_REGION || '').trim();
 
-// ط-normalize: نحذف أي /api/rest أو سلاش زائد بالنهاية
+// normalize
 function normalizeAstraEndpoint(ep) {
   if (!ep) return '';
-  let out = ep
-    .replace(/\/+$/, '')               // remove trailing slashes
-    .replace(/\/api\/rest.*$/i, '');   // remove /api/rest if provided by mistake
-  return out;
+  return ep.replace(/\/+$/, '').replace(/\/api\/rest.*$/i, '');
 }
 
-// إن لم يُوفَّر endpoint صريح، نبنيه من id + region
 export const ASTRA_DB_API_ENDPOINT = normalizeAstraEndpoint(
-  RAW_ENDPOINT || (RAW_ID && RAW_REGION
-    ? `https://${RAW_ID}-${RAW_REGION}.apps.astra.datastax.com`
-    : '')
+  RAW_ENDPOINT || (RAW_ID && RAW_REGION ? `https://${RAW_ID}-${RAW_REGION}.apps.astra.datastax.com` : '')
 );
 
-// التوكن (يجب أن يبدأ بـ AstraCS:)
+// token
 export const ASTRA_DB_APPLICATION_TOKEN =
   (process.env.ASTRA_DB_APPLICATION_TOKEN || process.env.ASTRA_DB_TOKEN || '').trim();
 
-// الـ keyspace
+// keyspace
 export const ASTRA_DB_KEYSPACE =
   (process.env.ASTRA_DB_KEYSPACE || process.env.ASTRA_NAMESPACE || 'whatsappbot').trim();
 
-// أسماء الكولكشن
+// collections
 export const ASTRA_CREDS_COLLECTION  = (process.env.ASTRA_CREDS_COLLECTION  || 'creds').trim();
 export const ASTRA_KEYS_COLLECTION   = (process.env.ASTRA_KEYS_COLLECTION   || 'keys').trim();
 export const ASTRA_BANNED_COLLECTION = (process.env.ASTRA_BANNED_COLLECTION || 'banned').trim();
@@ -56,7 +50,7 @@ export const ASTRA_LOCKS_COLLECTION  = (process.env.ASTRA_LOCKS_COLLECTION  || '
 // نستخدم Astra فقط للتوثيق/المفاتيح
 export const USE_ASTRA_AUTH = true;
 
-// مُؤشّر جاهزية
+// جاهزية
 export const ASTRA_READY = Boolean(
   ASTRA_DB_API_ENDPOINT &&
   ASTRA_DB_APPLICATION_TOKEN &&
